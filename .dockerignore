@@ -1,0 +1,16 @@
+.git
+.github
+.claude
+.env
+.env.*
+.envrc
+docs/
+tests/
+*.md
+!README.md
+bin/
+tmp/
+vendor/
+.idea/
+.vscode/
+coverage.*

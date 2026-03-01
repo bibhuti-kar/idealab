@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: idealab-operator
+  namespace: idealab-system
+  labels:
+    app.kubernetes.io/name: idealab-operator
+    app.kubernetes.io/part-of: idealab-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: idealab-operator
+  template:
+    metadata:
+      labels:
+        app: idealab-operator
+    spec:
+      serviceAccountName: idealab-operator
+      containers:
+        - name: operator
+          image: idealab-operator:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8081
+              name: health
+          env:
+            - name: LOG_LEVEL
+              value: info
+            - name: LOG_FORMAT
+              value: json
+            - name: HEALTH_PORT
+              value: "8081"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      nodeSelector:
+        kubernetes.io/os: linux

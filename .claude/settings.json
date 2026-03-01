@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hook": "BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null); if [ \"$BRANCH\" = \"main\" ] || [ \"$BRANCH\" = \"master\" ]; then echo 'BLOCK: Create a feature branch first.' >&2; exit 2; fi"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write(*.go)|Edit(*.go)",
+        "hook": "FILE=\"$TOOL_ARG_PATH\"; [ -f \"$FILE\" ] && gofmt -w \"$FILE\" 2>/dev/null; echo 'Formatted'"
+      }
+    ]
+  }
+}

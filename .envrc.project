@@ -1,0 +1,3 @@
+source_up
+export JIRA_PROJECT_KEY="IDEAL"
+export KUBECONFIG="/etc/rancher/k3s/k3s.yaml"

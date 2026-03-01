@@ -1,0 +1,51 @@
+# Template: GPU-accelerated AI workload deployment
+# This template is rendered by the operator based on GPUCluster applicationProfiles
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Name }}
+  namespace: {{ .Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Name }}
+    app.kubernetes.io/managed-by: idealab-operator
+    idealab.io/gpu-workload: "true"
+spec:
+  replicas: {{ .Replicas | default 1 }}
+  selector:
+    matchLabels:
+      app: {{ .Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Name }}
+        idealab.io/gpu-workload: "true"
+    spec:
+      containers:
+        - name: {{ .Name }}
+          image: {{ .Image }}
+          resources:
+            limits:
+              nvidia.com/gpu: {{ .Resources.GPUCount | default 1 }}
+              cpu: {{ .Resources.CPULimit | default "4000m" }}
+              memory: {{ .Resources.MemoryLimit | default "8Gi" }}
+            requests:
+              cpu: {{ .Resources.CPURequest | default "1000m" }}
+              memory: {{ .Resources.MemoryRequest | default "2Gi" }}
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "compute,utility"
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .ShmSize | default "2Gi" }}
+      runtimeClassName: nvidia
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule

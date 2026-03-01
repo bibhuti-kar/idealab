@@ -74,28 +74,10 @@ func (d *NVMLDiscoverer) Discover() (DeviceInfo, error) {
 }
 
 // realGPUDiscoverer uses NVML to enumerate GPUs.
-// This is separated to allow mocking in tests without build tags.
+// Implementation is in gpu_nvml.go (cgo) or gpu_stub.go (!cgo).
 type realGPUDiscoverer struct {
 	logger *slog.Logger
 }
-
-func (r *realGPUDiscoverer) discoverGPUs() ([]GPUInfo, error) {
-	// NVML integration requires cgo and libnvidia-ml.so at runtime.
-	// For now, this returns a helpful error directing users to ensure
-	// NVIDIA drivers are installed. The actual NVML calls will be
-	// implemented when building with CGO_ENABLED=1 on a system with
-	// NVIDIA drivers.
-	//
-	// In production, this will use:
-	//   nvml.Init() / nvml.DeviceGetCount() / nvml.DeviceGetHandleByIndex()
-	//   etc. from github.com/NVIDIA/go-nvml/pkg/nvml
-	//
-	// For development without a GPU, use MockDiscoverer or set
-	// MOCK_DISCOVERY=true.
-	return nil, fmt.Errorf("NVML not available: build with CGO_ENABLED=1 and NVIDIA drivers installed, or use MOCK_DISCOVERY=true")
-}
-
-func (r *realGPUDiscoverer) close() {}
 
 // mockGPUDiscoverer returns pre-configured GPU info for testing.
 type mockGPUDiscoverer struct {

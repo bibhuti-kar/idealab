@@ -82,15 +82,21 @@ install_nvidia_container_toolkit() {
 }
 
 configure_containerd_nvidia() {
-    log_info "Configuring containerd for NVIDIA runtime..."
-    # k3s uses its own containerd config path
-    K3S_CONTAINERD_CONFIG="/var/lib/rancher/k3s/agent/etc/containerd/config.toml"
+    # k3s v1.34+ auto-detects the NVIDIA container runtime if
+    # /usr/bin/nvidia-container-runtime exists on the host.
+    # DO NOT use nvidia-ctk runtime configure with k3s — it generates
+    # containerd v2 config which breaks k3s (which uses v3 format).
+    # DO NOT create config.toml.tmpl — it replaces the entire containerd
+    # config and breaks CNI networking.
     if [ -d "/var/lib/rancher/k3s" ]; then
-        mkdir -p "$(dirname "$K3S_CONTAINERD_CONFIG")"
-        nvidia-ctk runtime configure --runtime=containerd \
-            --config="$K3S_CONTAINERD_CONFIG" --set-as-default
-        log_ok "containerd configured with NVIDIA runtime (k3s path)"
+        if [ -x /usr/bin/nvidia-container-runtime ]; then
+            log_ok "NVIDIA container runtime found — k3s will auto-detect it"
+        else
+            log_error "nvidia-container-runtime not found at /usr/bin/nvidia-container-runtime"
+            return 1
+        fi
     else
+        # Non-k3s: use nvidia-ctk for standard containerd
         nvidia-ctk runtime configure --runtime=containerd --set-as-default
         log_ok "containerd configured with NVIDIA runtime (system path)"
     fi
@@ -165,7 +171,27 @@ EOF
 install_nvidia_device_plugin() {
     log_info "Installing NVIDIA device plugin..."
     k3s kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.15.0/deployments/static/nvidia-device-plugin.yml
-    log_ok "NVIDIA device plugin deployed"
+
+    # The device plugin pod must run with the nvidia RuntimeClass so it can
+    # access libnvidia-ml.so from the host via the NVIDIA container runtime.
+    log_info "Patching device plugin daemonset with runtimeClassName: nvidia..."
+    k3s kubectl patch daemonset nvidia-device-plugin-daemonset -n kube-system \
+        --type='json' \
+        -p='[{"op": "add", "path": "/spec/template/spec/runtimeClassName", "value": "nvidia"}]'
+
+    # Wait for the new pod to be ready
+    log_info "Waiting for device plugin pod to restart..."
+    sleep 10
+    for i in $(seq 1 30); do
+        READY=$(k3s kubectl get daemonset nvidia-device-plugin-daemonset -n kube-system \
+            -o jsonpath='{.status.numberReady}' 2>/dev/null || echo "0")
+        if [[ "$READY" -ge 1 ]]; then
+            break
+        fi
+        sleep 2
+    done
+
+    log_ok "NVIDIA device plugin deployed with runtimeClassName: nvidia"
 }
 
 validate_gpu_test_pod() {

@@ -29,9 +29,13 @@ format:
 vet:
 	go vet ./...
 
-# Build
+# Build (CGO_ENABLED=0: no NVML, uses stub; CGO_ENABLED=1: real NVML)
 build:
 	CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/operator ./cmd/operator
+	CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/preinstall ./cmd/preinstall
+
+build-gpu:
+	CGO_ENABLED=1 go build -ldflags="-s -w" -o bin/operator ./cmd/operator
 	CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/preinstall ./cmd/preinstall
 
 build-docker:

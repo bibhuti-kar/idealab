@@ -57,8 +57,8 @@ install_nvidia_driver() {
     fi
 
     log_info "Installing NVIDIA driver..."
-    apt-get install -y -qq nvidia-driver-550
-    log_ok "NVIDIA driver 550 installed — reboot may be required"
+    apt-get install -y -qq nvidia-driver-560
+    log_ok "NVIDIA driver 560 installed — reboot may be required"
 }
 
 install_nvidia_container_toolkit() {
@@ -82,9 +82,24 @@ install_nvidia_container_toolkit() {
 }
 
 configure_containerd_nvidia() {
-    log_info "Configuring containerd for NVIDIA runtime..."
-    nvidia-ctk runtime configure --runtime=containerd --set-as-default
-    log_ok "containerd configured with NVIDIA runtime"
+    # k3s v1.34+ auto-detects the NVIDIA container runtime if
+    # /usr/bin/nvidia-container-runtime exists on the host.
+    # DO NOT use nvidia-ctk runtime configure with k3s — it generates
+    # containerd v2 config which breaks k3s (which uses v3 format).
+    # DO NOT create config.toml.tmpl — it replaces the entire containerd
+    # config and breaks CNI networking.
+    if [ -d "/var/lib/rancher/k3s" ]; then
+        if [ -x /usr/bin/nvidia-container-runtime ]; then
+            log_ok "NVIDIA container runtime found — k3s will auto-detect it"
+        else
+            log_error "nvidia-container-runtime not found at /usr/bin/nvidia-container-runtime"
+            return 1
+        fi
+    else
+        # Non-k3s: use nvidia-ctk for standard containerd
+        nvidia-ctk runtime configure --runtime=containerd --set-as-default
+        log_ok "containerd configured with NVIDIA runtime (system path)"
+    fi
 }
 
 install_go() {
@@ -156,7 +171,71 @@ EOF
 install_nvidia_device_plugin() {
     log_info "Installing NVIDIA device plugin..."
     k3s kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.15.0/deployments/static/nvidia-device-plugin.yml
-    log_ok "NVIDIA device plugin deployed"
+
+    # The device plugin pod must run with the nvidia RuntimeClass so it can
+    # access libnvidia-ml.so from the host via the NVIDIA container runtime.
+    log_info "Patching device plugin daemonset with runtimeClassName: nvidia..."
+    k3s kubectl patch daemonset nvidia-device-plugin-daemonset -n kube-system \
+        --type='json' \
+        -p='[{"op": "add", "path": "/spec/template/spec/runtimeClassName", "value": "nvidia"}]'
+
+    # Wait for the new pod to be ready
+    log_info "Waiting for device plugin pod to restart..."
+    sleep 10
+    for i in $(seq 1 30); do
+        READY=$(k3s kubectl get daemonset nvidia-device-plugin-daemonset -n kube-system \
+            -o jsonpath='{.status.numberReady}' 2>/dev/null || echo "0")
+        if [[ "$READY" -ge 1 ]]; then
+            break
+        fi
+        sleep 2
+    done
+
+    log_ok "NVIDIA device plugin deployed with runtimeClassName: nvidia"
+}
+
+validate_gpu_test_pod() {
+    log_info "Running GPU test pod..."
+
+    k3s kubectl apply -f - <<'TESTPOD'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-test
+  namespace: default
+spec:
+  restartPolicy: Never
+  runtimeClassName: nvidia
+  containers:
+    - name: gpu-test
+      image: nvidia/cuda:12.6.0-base-ubuntu22.04
+      command: ["nvidia-smi"]
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+TESTPOD
+
+    log_info "Waiting for GPU test pod to complete..."
+    for i in $(seq 1 60); do
+        STATUS=$(k3s kubectl get pod gpu-test -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
+        if [[ "$STATUS" == "Succeeded" ]]; then
+            log_ok "GPU test pod succeeded"
+            k3s kubectl logs gpu-test
+            k3s kubectl delete pod gpu-test --ignore-not-found
+            return 0
+        elif [[ "$STATUS" == "Failed" ]]; then
+            log_error "GPU test pod failed"
+            k3s kubectl logs gpu-test
+            k3s kubectl delete pod gpu-test --ignore-not-found
+            return 1
+        fi
+        sleep 2
+    done
+
+    log_error "GPU test pod timed out after 120s"
+    k3s kubectl describe pod gpu-test
+    k3s kubectl delete pod gpu-test --ignore-not-found
+    return 1
 }
 
 validate() {
@@ -192,6 +271,13 @@ validate() {
         log_ok "containerd NVIDIA runtime configured"
     else
         log_warn "containerd NVIDIA runtime check inconclusive"
+    fi
+
+    # Run GPU test pod
+    if validate_gpu_test_pod; then
+        log_ok "GPU test pod validation passed"
+    else
+        log_warn "GPU test pod validation failed — device plugin may need more time"
     fi
 
     if [[ $ERRORS -gt 0 ]]; then

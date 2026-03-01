@@ -2,7 +2,23 @@
   "permissions": {
     "allow": [
       "Bash(chmod +x:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(kubectl run:*)",
+      "Bash(kubectl get:*)",
+      "Bash(nvidia-ctk:*)",
+      "Bash(kubectl logs:*)",
+      "Bash(kubectl describe:*)",
+      "Bash(kubectl wait:*)",
+      "Bash(journalctl:*)",
+      "WebSearch",
+      "WebFetch(domain:docs.k3s.io)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:docs.nvidia.com)",
+      "WebFetch(domain:k3d.io)",
+      "Bash(systemctl is-active:*)",
+      "Bash(cat:*)",
+      "Bash(kubectl apply:*)",
+      "Bash(kubectl exec:*)"
     ]
   }
 }

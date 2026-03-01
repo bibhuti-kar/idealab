@@ -6,6 +6,7 @@ import (
 	"github.com/bibhuti-kar/idealab/internal/discovery"
 
 	v1alpha1 "github.com/bibhuti-kar/idealab/api/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestMapDeviceInfoToNodeInfo(t *testing.T) {

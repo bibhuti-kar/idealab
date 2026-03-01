@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-server
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "ai-stack.labels" . | nindent 4 }}
+    {{- include "ai-stack.api.selectorLabels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.api.replicas }}
+  selector:
+    matchLabels:
+      {{- include "ai-stack.api.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ai-stack.api.selectorLabels" . | nindent 8 }}
+    spec:
+      # NOTE: No runtimeClassName here.
+      # CPU-only services do NOT need the nvidia container runtime.
+      # Only pods that access the GPU need runtimeClassName: nvidia.
+
+      containers:
+        - name: api-server
+          image: {{ .Values.api.image }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.api.port }}
+              protocol: TCP
+          resources:
+            requests:
+              cpu: {{ .Values.api.resources.requests.cpu }}
+              memory: {{ .Values.api.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.api.resources.limits.cpu }}
+              memory: {{ .Values.api.resources.limits.memory }}
+
+          # Ollama endpoint is injected from the ConfigMap.
+          envFrom:
+            - configMapRef:
+                name: ai-stack-config
+
+          # Replace this command with your API server's entrypoint.
+          # This default starts a minimal Python HTTP server that proxies
+          # requests to Ollama for demonstration purposes.
+          command:
+            - /bin/sh
+            - -c
+            - |
+              pip install --quiet flask requests 2>/dev/null
+              cat > /tmp/app.py << 'PYEOF'
+              import os, json
+              from flask import Flask, request, jsonify
+              import requests as req
+
+              app = Flask(__name__)
+              OLLAMA = os.environ.get("OLLAMA_URL", "http://ollama:11434")
+              MODEL = os.environ.get("OLLAMA_MODEL", "phi3:mini")
+
+              @app.route("/health")
+              def health():
+                  return jsonify(status="ok")
+
+              @app.route("/api/chat", methods=["POST"])
+              def chat():
+                  body = request.get_json(force=True)
+                  prompt = body.get("prompt", "")
+                  resp = req.post(f"{OLLAMA}/api/generate", json={
+                      "model": MODEL,
+                      "prompt": prompt,
+                      "stream": False,
+                  }, timeout=120)
+                  return jsonify(resp.json())
+
+              @app.route("/api/models")
+              def models():
+                  resp = req.get(f"{OLLAMA}/api/tags", timeout=10)
+                  return jsonify(resp.json())
+
+              if __name__ == "__main__":
+                  app.run(host="0.0.0.0", port=int(os.environ.get("API_PORT", "8000")))
+              PYEOF
+              python /tmp/app.py
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10

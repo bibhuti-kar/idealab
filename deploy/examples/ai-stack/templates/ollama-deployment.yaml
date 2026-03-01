@@ -1,0 +1,125 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "ai-stack.labels" . | nindent 4 }}
+    {{- include "ai-stack.ollama.selectorLabels" . | nindent 4 }}
+    idealab.io/gpu-workload: "true"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "ai-stack.ollama.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ai-stack.ollama.selectorLabels" . | nindent 8 }}
+        idealab.io/gpu-workload: "true"
+    spec:
+      # --- GPU PATTERN 1: RuntimeClass ---
+      # Required for pods that need access to the NVIDIA GPU.
+      # This tells containerd to use the nvidia container runtime,
+      # which mounts the host GPU drivers into the container.
+      runtimeClassName: nvidia
+
+      # --- GPU PATTERN 5: Node affinity ---
+      # Schedule only on nodes where idealab operator discovered a GPU.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: idealab.io/gpu-model
+                    operator: Exists
+
+      # Tolerate the nvidia.com/gpu taint if the device plugin sets one.
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+      containers:
+        - name: ollama
+          image: {{ .Values.ollama.image }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.ollama.port }}
+              protocol: TCP
+
+          # --- GPU PATTERN 2: Resource limits ---
+          # The nvidia.com/gpu resource is registered by the NVIDIA device plugin.
+          # Requesting it ensures exactly N GPUs are allocated to this pod.
+          resources:
+            requests:
+              cpu: {{ .Values.ollama.resources.requests.cpu }}
+              memory: {{ .Values.ollama.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.ollama.resources.limits.cpu }}
+              memory: {{ .Values.ollama.resources.limits.memory }}
+              {{- if gt (int .Values.ollama.gpu.count) 0 }}
+              nvidia.com/gpu: {{ .Values.ollama.gpu.count | quote }}
+              {{- end }}
+
+          # --- GPU PATTERN 3: NVIDIA environment variables ---
+          # These tell the NVIDIA container runtime which GPU capabilities
+          # to expose inside the container.
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "compute,utility"
+            - name: OLLAMA_HOST
+              value: "0.0.0.0:{{ .Values.ollama.port }}"
+
+          volumeMounts:
+            # --- GPU PATTERN 4: Shared memory ---
+            # LLM inference engines use /dev/shm for inter-process communication
+            # and loading model weights into shared memory. The default 64MB is
+            # too small — set this to at least 1-2Gi for 7B parameter models.
+            - name: shm
+              mountPath: /dev/shm
+            {{- if .Values.ollama.persistence.enabled }}
+            - name: ollama-data
+              mountPath: /root/.ollama
+            {{- end }}
+
+          # Pull the configured model after Ollama starts.
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    sleep 5
+                    ollama pull {{ .Values.ollama.model }}
+
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.ollama.gpu.shmSize }}
+        {{- if .Values.ollama.persistence.enabled }}
+        - name: ollama-data
+          persistentVolumeClaim:
+            claimName: ollama-data
+        {{- end }}

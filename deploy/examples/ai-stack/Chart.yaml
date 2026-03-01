@@ -1,0 +1,12 @@
+apiVersion: v2
+name: ai-stack
+description: Multi-service AI application with GPU-accelerated LLM inference on idealab
+version: 0.1.0
+appVersion: "1.0.0"
+type: application
+keywords:
+  - gpu
+  - llm
+  - ollama
+  - ai
+  - idealab

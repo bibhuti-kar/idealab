@@ -1,0 +1,17 @@
+{{- if .Values.ollama.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-data
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "ai-stack.labels" . | nindent 4 }}
+    {{- include "ai-stack.ollama.selectorLabels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.ollama.persistence.storageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.ollama.persistence.size }}
+{{- end }}

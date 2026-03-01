@@ -11,11 +11,14 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
-COPY . .
+COPY api/ api/
+COPY cmd/ cmd/
+COPY internal/ internal/
 RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w" -o /operator ./cmd/operator
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /preinstall ./cmd/preinstall
 
 FROM nvidia/cuda:12.6.0-base-ubuntu22.04
+RUN apt-get update -qq && apt-get install -y -qq wget && rm -rf /var/lib/apt/lists/*
 RUN groupadd -r appuser && useradd -r -g appuser -u 1000 appuser
 COPY --from=builder /operator /operator
 COPY --from=builder /preinstall /preinstall
@@ -24,5 +27,5 @@ COPY scripts/ /scripts/
 USER appuser
 EXPOSE 8081
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD ["/operator", "health"]
+  CMD wget --spider -q http://localhost:8081/healthz || exit 1
 ENTRYPOINT ["/operator"]

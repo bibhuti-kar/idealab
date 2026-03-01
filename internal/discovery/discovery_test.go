@@ -3,6 +3,7 @@ package discovery
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -167,7 +168,7 @@ func TestNVMLDiscoverer_GPUFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !errors.Is(err, err) {
-		t.Error("expected wrapped gpu discovery error")
+	if !strings.Contains(err.Error(), "nvml init failed") {
+		t.Errorf("expected error to contain 'nvml init failed', got: %s", err.Error())
 	}
 }

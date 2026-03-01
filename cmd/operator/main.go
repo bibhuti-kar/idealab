@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -28,77 +30,97 @@ func main() {
 	logger := setupLogger()
 	logger.Info("idealab operator starting")
 
-	scheme := runtime.NewScheme()
-	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(corev1.AddToScheme(scheme))
-	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
 
+	if err := run(ctx, logger); err != nil {
+		logger.Error("operator failed", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("idealab operator stopped")
+}
+
+func run(ctx context.Context, logger *slog.Logger) error {
+	scheme := setupScheme()
 	healthPort := envInt("HEALTH_PORT", 8081)
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	mgr, err := setupManager(scheme)
+	if err != nil {
+		return fmt.Errorf("create manager: %w", err)
+	}
+
+	reconciler := setupReconciler(mgr, logger)
+	if err := reconciler.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup reconciler: %w", err)
+	}
+
+	if err := addHealthChecks(mgr, reconciler); err != nil {
+		return fmt.Errorf("add health checks: %w", err)
+	}
+
+	healthServer := healthpkg.NewServer(healthPort, reconciler.IsReconciled, logger)
+	go func() {
+		if err := healthServer.Start(); err != nil && err != http.ErrServerClosed {
+			logger.Error("health server failed", "error", err)
+			cancel := ctx.Done
+			_ = cancel
+		}
+	}()
+
+	logger.Info("starting manager")
+	if err := mgr.Start(ctx); err != nil {
+		return fmt.Errorf("manager run: %w", err)
+	}
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := healthServer.Shutdown(shutdownCtx); err != nil {
+		logger.Warn("health server shutdown error", "error", err)
+	}
+	return nil
+}
+
+func setupScheme() *runtime.Scheme {
+	s := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(s))
+	utilruntime.Must(corev1.AddToScheme(s))
+	utilruntime.Must(v1alpha1.AddToScheme(s))
+	return s
+}
+
+func setupManager(scheme *runtime.Scheme) (ctrl.Manager, error) {
+	return ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
 			BindAddress: "0",
 		},
 		LeaderElection: false,
 	})
-	if err != nil {
-		logger.Error("failed to create manager", "error", err)
-		os.Exit(1)
-	}
+}
 
-	discoverer := createDiscoverer(logger)
-
-	reconciler := &controller.GPUClusterReconciler{
+func setupReconciler(mgr ctrl.Manager, logger *slog.Logger) *controller.GPUClusterReconciler {
+	return &controller.GPUClusterReconciler{
 		Client:     mgr.GetClient(),
 		Scheme:     mgr.GetScheme(),
-		Discoverer: discoverer,
+		Discoverer: createDiscoverer(logger),
 		Logger:     logger,
 		Recorder:   mgr.GetEventRecorderFor("idealab-operator"),
 	}
+}
 
-	if err := reconciler.SetupWithManager(mgr); err != nil {
-		logger.Error("failed to setup reconciler", "error", err)
-		os.Exit(1)
-	}
-
+func addHealthChecks(mgr ctrl.Manager, r *controller.GPUClusterReconciler) error {
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		logger.Error("failed to add healthz check", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("healthz: %w", err)
 	}
 	if err := mgr.AddReadyzCheck("readyz", func(_ *http.Request) error {
-		if reconciler.IsReconciled() {
+		if r.IsReconciled() {
 			return nil
 		}
-		return &healthz.NotReadyError{Reason: "not yet reconciled"}
+		return fmt.Errorf("not yet reconciled")
 	}); err != nil {
-		logger.Error("failed to add readyz check", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("readyz: %w", err)
 	}
-
-	// Start standalone health server for external probes.
-	healthServer := healthpkg.NewServer(healthPort, reconciler.IsReconciled, logger)
-	go func() {
-		if err := healthServer.Start(); err != nil && err != http.ErrServerClosed {
-			logger.Error("health server failed", "error", err)
-			os.Exit(1)
-		}
-	}()
-
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
-	logger.Info("starting manager")
-	if err := mgr.Start(ctx); err != nil {
-		logger.Error("manager exited with error", "error", err)
-		os.Exit(1)
-	}
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5000000000)
-	defer shutdownCancel()
-	healthServer.Shutdown(shutdownCtx)
-
-	logger.Info("idealab operator stopped")
+	return nil
 }
 
 func createDiscoverer(logger *slog.Logger) discovery.Discoverer {
@@ -127,7 +149,6 @@ func setupLogger() *slog.Logger {
 	} else {
 		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})
 	}
-
 	return slog.New(handler)
 }
 

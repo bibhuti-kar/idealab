@@ -18,31 +18,36 @@ func discoverCPU(logger *slog.Logger) (CPUInfo, error) {
 
 	f, err := os.Open("/proc/cpuinfo")
 	if err != nil {
-		logger.Warn("failed to open /proc/cpuinfo, using runtime defaults", "error", err)
+		logger.Warn("failed to open /proc/cpuinfo", "error", err)
 		return info, nil
 	}
 	defer f.Close()
 
-	var physicalIDs = make(map[string]bool)
-	var coreIDs = make(map[string]bool)
+	coreIDs := parseProcCPUInfo(f, &info)
+	if len(coreIDs) > 0 {
+		info.Cores = len(coreIDs)
+	} else {
+		info.Cores = info.Threads
+	}
 
+	logger.Debug("CPU discovered", "model", info.Model, "cores", info.Cores)
+	return info, nil
+}
+
+// parseProcCPUInfo extracts fields from /proc/cpuinfo.
+func parseProcCPUInfo(f *os.File, info *CPUInfo) map[string]bool {
+	coreIDs := make(map[string]bool)
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		line := scanner.Text()
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) != 2 {
+		key, value, ok := parseProcLine(scanner.Text())
+		if !ok {
 			continue
 		}
-		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-
 		switch key {
 		case "model name":
 			if info.Model == "" {
 				info.Model = value
 			}
-		case "physical id":
-			physicalIDs[value] = true
 		case "core id":
 			coreIDs[value] = true
 		case "flags":
@@ -51,35 +56,30 @@ func discoverCPU(logger *slog.Logger) (CPUInfo, error) {
 			}
 		}
 	}
+	return coreIDs
+}
 
-	if len(coreIDs) > 0 {
-		info.Cores = len(coreIDs)
-	} else {
-		info.Cores = info.Threads
+func parseProcLine(line string) (string, string, bool) {
+	parts := strings.SplitN(line, ":", 2)
+	if len(parts) != 2 {
+		return "", "", false
 	}
-
-	logger.Debug("CPU discovered",
-		"model", info.Model,
-		"cores", info.Cores,
-		"threads", info.Threads,
-	)
-	return info, nil
+	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), true
 }
 
 // extractCPUFeatures filters CPU flags to a useful subset.
 func extractCPUFeatures(flagsLine string) []string {
 	relevant := map[string]string{
-		"sse4_1": "SSE4.1",
-		"sse4_2": "SSE4.2",
-		"avx":    "AVX",
-		"avx2":   "AVX2",
-		"avx512f": "AVX-512",
-		"fma":    "FMA",
-		"aes":    "AES-NI",
-		"vnni":   "VNNI",
+		"sse4_1":   "SSE4.1",
+		"sse4_2":   "SSE4.2",
+		"avx":      "AVX",
+		"avx2":     "AVX2",
+		"avx512f":  "AVX-512",
+		"fma":      "FMA",
+		"aes":      "AES-NI",
+		"vnni":     "VNNI",
 		"amx_tile": "AMX",
 	}
-
 	flags := strings.Fields(flagsLine)
 	var features []string
 	for _, flag := range flags {

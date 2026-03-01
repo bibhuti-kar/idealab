@@ -1,0 +1,12 @@
+apiVersion: idealab.io/v1alpha1
+kind: GPUCluster
+metadata:
+  name: my-gpu-cluster
+spec:
+  driver:
+    enabled: true
+    version: "560"
+  devicePlugin:
+    enabled: true
+  gpuFeatureDiscovery:
+    enabled: true

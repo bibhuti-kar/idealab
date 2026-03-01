@@ -66,8 +66,10 @@ func (r *realGPUDiscoverer) readGPUInfo(device nvml.Device, driverVersion, cudaV
 
 	memory, ret := device.GetMemoryInfo()
 	vramMB := 0
+	vramUsedMB := 0
 	if ret == nvml.SUCCESS {
 		vramMB = int(memory.Total / (1024 * 1024))
+		vramUsedMB = int(memory.Used / (1024 * 1024))
 	}
 
 	major, minor, ret := device.GetCudaComputeCapability()
@@ -88,15 +90,23 @@ func (r *realGPUDiscoverer) readGPUInfo(device nvml.Device, driverVersion, cudaV
 		util = int(utilRates.Gpu)
 	}
 
+	powerMilliW := 0
+	powerVal, ret := device.GetPowerUsage()
+	if ret == nvml.SUCCESS {
+		powerMilliW = int(powerVal)
+	}
+
 	return GPUInfo{
 		Model:             name,
 		UUID:              uuid,
 		VRAMMB:            vramMB,
+		VRAMUsedMB:        vramUsedMB,
 		DriverVersion:     driverVersion,
 		CUDAVersion:       cudaVersion,
 		ComputeCapability: computeCap,
 		Temperature:       temp,
 		UtilizationPct:    util,
+		PowerWatts:        powerMilliW / 1000,
 	}, nil
 }
 

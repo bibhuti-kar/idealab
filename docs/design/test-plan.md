@@ -1,11 +1,11 @@
 # Test Plan: idealab GPU Operator -- Sprint 1
 
-**Version:** 1.0
+**Version:** 2.0
 **Date:** 2026-03-01
 **Author:** Engineer
-**Status:** Draft
+**Status:** Updated
 **JIRA Key:** IDEAL
-**Sprint:** 1 (E1 + E2 + E3)
+**Sprint:** 1 (E1 + E2 + E3) + 2 (E4 + E5)
 
 ---
 
@@ -186,6 +186,85 @@ Tests verify Go type definitions match the CRD YAML schema.
 | `TestGPUCluster_DeepCopy` | IDEAL-301 AC2 | DeepCopy produces independent copy | Create GPUCluster, deep copy, modify original | Copy is unaffected by modification |
 | `TestGPUCluster_SchemeRegistration` | IDEAL-301 AC1 | Types register with runtime.Scheme | Register and look up GVK | GVK resolves to GPUCluster type |
 | `TestGPUCluster_GroupVersion` | IDEAL-301 AC1 | GroupVersion is idealab.io/v1alpha1 | Read GroupVersion constant | Group="idealab.io", Version="v1alpha1" |
+
+---
+
+### 2.5 Config Module (`internal/config/*_test.go`)
+
+Tests are pure functions — no K8s deps.
+
+#### 2.5.1 Merge
+
+| Test Case | AC | Description | Input | Expected |
+|-----------|----|-------------|-------|----------|
+| `TestMergeMaps_FlatOverride` | IDEAL-402 AC2 | Src values override dst | dst={a:old}, src={a:new} | a=new |
+| `TestMergeMaps_DeepMerge` | IDEAL-402 AC2 | Nested maps merge recursively | Nested dst+src | Merged with all keys |
+| `TestMergeMaps_NilDst` | -- | Nil dst creates new map | nil dst, src={k:v} | {k:v} |
+| `TestMergeMaps_NilSrc` | -- | Nil src preserves dst | dst={k:v}, nil src | {k:v} |
+
+#### 2.5.2 Values Generation
+
+| Test Case | AC | Description | Input | Expected |
+|-----------|----|-------------|-------|----------|
+| `TestGenerateValues_HardwareDefaults` | IDEAL-402 AC1 | GPU/CPU/memory defaults populated | Profile + GTX 1660 Ti hardware | gpu.model, gpu.vramMB (minus 512 reserve), resources.limits set |
+| `TestGenerateValues_UserOverrides` | IDEAL-402 AC2 | User HelmValues win over defaults | Profile with overrides | User values override hardware defaults |
+| `TestGenerateValues_NoGPU` | IDEAL-402 AC1 | CPU-only hardware skips GPU section | No GPU in hardware | No gpu key, no nvidia.com/gpu limit |
+| `TestGenerateValues_ProfileResourceLimits` | IDEAL-402 AC1 | Profile CPU/memory limits used | Profile with explicit limits | Limits match profile values |
+| `TestGenerateValues_VRAMReserve` | IDEAL-402 AC1 | VRAM below reserve clamps to 0 | 256MB VRAM GPU | vramMB=0 |
+| `TestParseGPUMemoryMB` | IDEAL-402 AC3 | Memory string parsing (Gi, Mi, raw) | "4Gi", "2048Mi", "" | 4096, 2048, 0 |
+
+#### 2.5.3 Validation
+
+| Test Case | AC | Description | Input | Expected |
+|-----------|----|-------------|-------|----------|
+| `TestCheckResourceOvercommit_UnderLimit` | IDEAL-402 AC3 | No warning when within limit | 3GB requested, 6GB available | Empty string |
+| `TestCheckResourceOvercommit_OverLimit` | IDEAL-402 AC3 | Warning when exceeding limit | 7GB requested, 6GB available | Non-empty warning with profile names |
+| `TestCheckResourceOvercommit_NoGPUMemorySet` | -- | No warning for CPU-only profiles | No gpuMemory set | Empty string |
+| `TestCheckResourceOvercommit_ZeroAvailable` | -- | No warning with zero VRAM | 0 available | Empty string |
+
+#### 2.5.4 Render
+
+| Test Case | AC | Description | Input | Expected |
+|-----------|----|-------------|-------|----------|
+| `TestRenderYAML_Simple` | IDEAL-403 AC1 | Simple map to YAML | {key: value, num: 42} | Contains "key: value" |
+| `TestRenderYAML_Nested` | IDEAL-403 AC1 | Nested map to YAML | {parent: {child: val}} | Valid nested YAML |
+| `TestRenderYAML_Empty` | -- | Empty map renders as {} | {} | "{}\n" |
+
+### 2.6 ConfigMap Reconciliation (`internal/controller/configmaps_test.go`)
+
+Tests use `fake.NewClientBuilder()` with scheme.
+
+| Test Case | AC | Description | Setup | Expected |
+|-----------|----|-------------|-------|----------|
+| `TestReconcileConfigMaps_Create` | IDEAL-403 AC1 | ConfigMap created per profile | 1 profile, no existing CMs | CM created with correct name, labels, data |
+| `TestReconcileConfigMaps_Update` | IDEAL-403 AC2 | ConfigMap updated on change | Existing CM with old data | CM data updated |
+| `TestReconcileConfigMaps_MultiProfile` | IDEAL-403 AC1 | Multiple profiles create multiple CMs | 2 profiles | 2 CMs created, 2 profile statuses |
+| `TestReconcileConfigMaps_OrphanCleanup` | IDEAL-403 AC2 | Removed profiles delete orphan CMs | 1 profile + 1 orphan CM | Orphan deleted |
+| `TestCheckResourceWarning` | IDEAL-402 AC3 | ResourceWarning set on overcommit | 2 profiles exceeding 6GB | status.resourceWarning non-empty |
+| `TestConfigMapName` | -- | Naming convention | gc=my-cluster, profile=ollama | "my-cluster-ollama-values" |
+| `TestBuildHardwareInfo` | -- | Discovery to HardwareInfo mapping | Mock DeviceInfo | All fields mapped |
+| `TestBuildHardwareInfo_NoGPU` | -- | No GPU case | No GPUs | Empty GPU fields |
+
+### 2.7 Finalizer (`internal/controller/finalizer_test.go`)
+
+| Test Case | AC | Description | Setup | Expected |
+|-----------|----|-------------|-------|----------|
+| `TestEnsureFinalizer_Add` | IDEAL-403 AC1 | Finalizer added on first reconcile | GPUCluster without finalizer | Finalizer present |
+| `TestEnsureFinalizer_AlreadyPresent` | -- | Nop when already present | GPUCluster with finalizer | No error, no change |
+| `TestHandleDeletion_NotDeleting` | -- | Returns false for non-deleted resource | No DeletionTimestamp | deleting=false |
+| `TestHandleDeletion_CleansUpConfigMaps` | IDEAL-403 AC1 | Deletes CMs and removes finalizer | Deleted GPUCluster + CM | CM deleted, finalizer removed |
+
+### 2.8 Metrics (`internal/metrics/metrics_test.go`, `internal/controller/metrics_test.go`)
+
+| Test Case | AC | Description | Setup | Expected |
+|-----------|----|-------------|-------|----------|
+| `TestMetricsRegistration` | E5 | All metrics register without error | Fresh prometheus.Registry | No registration errors |
+| `TestGPUGaugesSetValues` | E5 | GPU gauges accept label values | Set temp, util, VRAM | No panic |
+| `TestCounterIncrement` | E5 | Reconcile counter increments | Inc success/error | No panic |
+| `TestConfigMapsGauge` | E5 | ConfigMaps gauge accepts value | Set(3) | No panic |
+| `TestRecordGPUMetrics` | E5 | Controller helper records GPU data | Mock DeviceInfo | No panic |
+| `TestRecordGPUMetrics_NoGPU` | E5 | No panic with empty GPUs | No GPUs | No panic |
+| `TestRecordConfigMapCount` | E5 | ConfigMap count set | Set(3), Set(0) | No panic |
 
 ---
 
@@ -470,9 +549,12 @@ spec:
 | E1 Pre-Install | 3 | 9 | 0 | 0 | 10 |
 | E2 Discovery | 4 | 9 | 13 | 1 (via reconcile) | 2 |
 | E3 Operator Core | 4 | 10 | 25 | 9 | 10 |
-| **Total** | **11** | **28** | **38** | **10** | **22** |
+| E4 Config Templates | 3 | 7 | 21 | 8 | 0 |
+| E5 Monitoring | -- | -- | 7 | 0 | 0 |
+| **Total** | **14** | **35** | **66** | **18** | **22** |
 
-**Grand total: 70 test cases covering 28 acceptance criteria.**
+**Grand total: 106 test cases covering 35 acceptance criteria.**
+**Currently passing: 53 unit tests across 6 packages.**
 
 ### 8.2 Coverage Gap Analysis
 
@@ -484,6 +566,27 @@ following criteria have extra depth:
 - IDEAL-304 AC2 (readyz reflects state): 3 unit tests + 2 E2E tests.
 
 No gaps identified. All P0 acceptance criteria have multi-tier coverage.
+
+### 5.4 E4: Configuration Templates
+
+| Story | AC | Unit | Integration | E2E |
+|-------|----|------|-------------|-----|
+| IDEAL-401 | AC1: Profiles accepted in spec | `TestGenerateValues_HardwareDefaults` | `TestReconcileConfigMaps_Create` | -- |
+| IDEAL-401 | AC2: Empty name/chart rejected | (CRD YAML `required` + `minLength` validation) | -- | -- |
+| IDEAL-402 | AC1: Hardware-derived settings | `TestGenerateValues_HardwareDefaults`, `TestGenerateValues_NoGPU`, `TestGenerateValues_VRAMReserve` | `TestReconcileConfigMaps_Create` | -- |
+| IDEAL-402 | AC2: User overrides win | `TestGenerateValues_UserOverrides`, `TestMergeMaps_FlatOverride`, `TestMergeMaps_DeepMerge` | -- | -- |
+| IDEAL-402 | AC3: ResourceWarning on overcommit | `TestCheckResourceOvercommit_OverLimit`, `TestCheckResourceOvercommit_UnderLimit` | `TestCheckResourceWarning` | -- |
+| IDEAL-403 | AC1: ConfigMap per profile | `TestRenderYAML_Simple`, `TestRenderYAML_Nested` | `TestReconcileConfigMaps_Create`, `TestReconcileConfigMaps_MultiProfile`, `TestEnsureFinalizer_Add`, `TestHandleDeletion_CleansUpConfigMaps` | -- |
+| IDEAL-403 | AC2: ConfigMap updated on change | -- | `TestReconcileConfigMaps_Update`, `TestReconcileConfigMaps_OrphanCleanup` | -- |
+
+### 5.5 E5: Monitoring
+
+| Feature | Unit | Integration |
+|---------|------|-------------|
+| GPU telemetry gauges | `TestGPUGaugesSetValues`, `TestRecordGPUMetrics`, `TestRecordGPUMetrics_NoGPU` | -- |
+| Reconcile counters | `TestCounterIncrement` | -- |
+| ConfigMaps gauge | `TestConfigMapsGauge`, `TestRecordConfigMapCount` | -- |
+| Metrics registration | `TestMetricsRegistration` | -- |
 
 ---
 

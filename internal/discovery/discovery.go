@@ -16,11 +16,13 @@ type GPUInfo struct {
 	Model             string `json:"model"`
 	UUID              string `json:"uuid"`
 	VRAMMB            int    `json:"vramMB"`
+	VRAMUsedMB        int    `json:"vramUsedMB,omitempty"`
 	DriverVersion     string `json:"driverVersion"`
 	CUDAVersion       string `json:"cudaVersion"`
 	ComputeCapability string `json:"computeCapability"`
 	Temperature       int    `json:"temperature,omitempty"`
 	UtilizationPct    int    `json:"utilizationPct,omitempty"`
+	PowerWatts        int    `json:"powerWatts,omitempty"`
 }
 
 // MemoryInfo holds discovered system memory properties.

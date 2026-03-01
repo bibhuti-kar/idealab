@@ -10,3 +10,20 @@ spec:
     enabled: true
   gpuFeatureDiscovery:
     enabled: true
+  applicationProfiles:
+    - name: ollama-inference
+      helmChart: ollama/ollama
+      helmValues:
+        ollama:
+          gpu:
+            enabled: true
+          models:
+            - phi3:mini
+        service:
+          type: NodePort
+          nodePort: 30080
+      resources:
+        gpuCount: 1
+        gpuMemory: "4Gi"
+        cpuLimit: "4"
+        memoryLimit: "8Gi"

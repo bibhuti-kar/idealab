@@ -1,11 +1,11 @@
 # Technical Design Document: idealab GPU Operator
 
-**Version:** 1.0
+**Version:** 2.0
 **Date:** 2026-03-01
 **Author:** Engineer
-**Status:** Draft
+**Status:** Updated
 **JIRA Key:** IDEAL
-**Sprint:** 1 (E1 + E2 + E3)
+**Sprint:** 1 (E1 + E2 + E3) + 2 (E4 + E5)
 
 ---
 
@@ -27,7 +27,12 @@ NVIDIA GPU (GTX 1660 Ti Mobile, Turing architecture, 6GB VRAM).
 | E2: Device Discovery | CPU, GPU, and memory enumeration | `internal/discovery` package |
 | E3: Operator Core | CRD, controller, health endpoints | `api/v1alpha1`, `internal/controller`, `internal/health`, `cmd/operator` |
 
-**Sprint 2** (out of scope for this document) covers E4: Configuration Templates.
+**Sprint 2** covers two additional epics:
+
+| Epic | Scope | Deliverables |
+|------|-------|-------------|
+| E4: Config Templates | Helm values generation from profiles + hardware | `internal/config` package, ConfigMap reconciliation, finalizer |
+| E5: Monitoring | Prometheus metrics for GPU telemetry + reconciliation | `internal/metrics` package, controller metrics helpers |
 
 ### 1.3 Key Constraints
 
@@ -75,6 +80,8 @@ Host (Ubuntu 22.04/24.04 + GTX 1660 Ti)
 | Controller | `internal/controller/` | k3s Pod (via operator) | Watches GPUCluster CRD, reconciles state, updates status |
 | Health Server | `internal/health/` | k3s Pod (via operator) | HTTP server on :8081 with /healthz and /readyz |
 | CRD Types | `api/v1alpha1/` | Build-time + runtime | Go types matching `deploy/crds/gpucluster.yaml` |
+| Config Engine | `internal/config/` | k3s Pod (via operator) | Generates Helm values from hardware + profiles, validates resource overcommit |
+| Metrics | `internal/metrics/` | k3s Pod (via operator) | Prometheus gauges/counters for GPU telemetry and reconciliation stats |
 
 ### 2.2 Data Flow
 
@@ -91,9 +98,9 @@ Host (Ubuntu 22.04/24.04 + GTX 1660 Ti)
                       |  (internal/controller)    |
                       +---------------------------+
                          |                    |
-                    1. Fetch CR          4. Update CR status
-                    2. Set phase         5. Label node
-                       "Discovering"     6. Set conditions
+                    1. Fetch CR          7. Update CR status
+                    2. Handle deletion   8. Label node
+                    3. Ensure finalizer  9. Set conditions
                          |
                          v
                       +---------------------------+
@@ -108,14 +115,19 @@ Host (Ubuntu 22.04/24.04 + GTX 1660 Ti)
                       +---------------------------+
                       |  DeviceInfo struct        |
                       +---------------------------+
-                                    |
-                                    v
-                      GPUCluster status updated:
-                        status.phase = "Ready"
-                        status.node.cpu = {...}
-                        status.node.gpu = {...}
-                        status.node.memory = {...}
-                        status.conditions = [Ready=True]
+                         |                    |
+                         v                    v
+                      +----------------+  +------------------+
+                      | Config Engine  |  | Prometheus       |
+                      | (internal/     |  | Metrics          |
+                      |  config)       |  | (internal/       |
+                      +----------------+  |  metrics)        |
+                         |                +------------------+
+                         v                    |
+                      ConfigMaps per          v
+                      profile in           :8080/metrics
+                      idealab-system       GPU gauges +
+                                           reconcile counters
 ```
 
 ### 2.3 Reconciliation State Machine
@@ -124,24 +136,40 @@ Host (Ubuntu 22.04/24.04 + GTX 1660 Ti)
 GPUCluster Created
         |
         v
-    [Pending] ----> set phase "Discovering"
+    [Pending] ----> handle deletion? --yes--> cleanup ConfigMaps, remove finalizer
         |               |
+        no              |
         v               v
-  (first reconcile)   Run device discovery
-        |               |
-        +-------+-------+
-                |
-        +-------+-------+
-        |               |
-     Success          Failure
-        |               |
-        v               v
-    [Ready]          [Error]
-     phase="Ready"    phase="Error"
-     Ready=True       Ready=False
-     Discovering=     reason="DiscoveryFailed"
-       False          message=<error detail>
-                      requeue with backoff
+    ensure finalizer (if profiles exist)
+        |
+        v
+    set phase "Discovering"
+        |
+        v
+    Run device discovery
+        |
+  +-----+------+
+  |            |
+Success     Failure
+  |            |
+  v            v
+Label node  [Error]
+Record GPU   phase="Error"
+ metrics     Ready=False
+  |          requeue with backoff
+  v
+If profiles:
+  reconcileConfigMaps
+  checkResourceWarning
+  recordConfigMapCount
+  |
+  v
+[Ready]
+ phase="Ready"
+ Ready=True
+ Discovering=False
+ record reconcile metrics
+ requeue in 5 minutes
 ```
 
 ### 2.4 Module Dependency Graph
@@ -150,11 +178,21 @@ GPUCluster Created
 cmd/operator
   +-- internal/controller
   |     +-- internal/discovery
+  |     +-- internal/config
+  |     +-- internal/metrics
   |     +-- api/v1alpha1
   |     +-- sigs.k8s.io/controller-runtime
+  +-- internal/metrics
   +-- internal/health
   +-- api/v1alpha1
         +-- k8s.io/apimachinery
+
+internal/config
+  +-- gopkg.in/yaml.v3
+
+internal/metrics
+  +-- github.com/prometheus/client_golang
+  +-- sigs.k8s.io/controller-runtime/pkg/metrics
 
 internal/discovery
   +-- github.com/NVIDIA/go-nvml/pkg/nvml
@@ -349,6 +387,7 @@ GPUClusterReconciler
   +-- Discoverer: discovery.Discoverer   // injected (real or mock)
   +-- Logger: *slog.Logger               // structured logger
   +-- Recorder: record.EventRecorder     // k8s event recorder
+  +-- Namespace: string                  // from POD_NAMESPACE env, default "idealab-system"
   +-- reconciled: atomic.Bool            // tracks if at least one reconcile succeeded
 ```
 
@@ -361,13 +400,18 @@ func (r *GPUClusterReconciler) Reconcile(ctx, req) (ctrl.Result, error):
      - If NotFound: return (no requeue) -- resource deleted
      - If error: return error (requeue with backoff)
 
-  2. If status.phase is empty or "Pending":
+  2. Handle deletion: if DeletionTimestamp set, cleanup ConfigMaps,
+     remove finalizer, return.
+
+  3. If profiles defined, ensure finalizer "idealab.io/configmap-cleanup".
+
+  4. If status.phase is empty or "Pending":
      - Set status.phase = "Discovering"
      - Set condition Discovering=True, reason="DiscoveryInProgress"
      - Update status subresource
      - Record event "DiscoveryStarted"
 
-  3. Run r.Discoverer.Discover()
+  5. Run r.Discoverer.Discover()
      - If error:
        - Set status.phase = "Error"
        - Set condition Ready=False, reason="DiscoveryFailed", message=err.Error()
@@ -376,29 +420,20 @@ func (r *GPUClusterReconciler) Reconcile(ctx, req) (ctrl.Result, error):
        - Record event "DiscoveryFailed"
        - Return ctrl.Result{RequeueAfter: backoff}, nil
 
-  4. Map DeviceInfo to GPUCluster status fields:
-     - status.node.hostname = deviceInfo.Hostname
-     - status.node.cpu = {model, cores, threads, features}
-     - status.node.gpu = {model, vramMB, driverVersion, cudaVersion, computeCapability}
-       (from GPUs[0] -- single GPU assumption)
-     - status.node.memory = {totalMB}
+  6. Map DeviceInfo to GPUCluster status fields.
 
-  5. Label the k3s node with GPU metadata:
-     - idealab.io/gpu-model = <sanitized model name>
-     - idealab.io/gpu-vram-mb = <vram MB>
-     - idealab.io/gpu-driver = <driver version>
-     - idealab.io/gpu-cuda = <cuda version>
-     - idealab.io/gpu-compute = <compute capability>
+  7. Label the k3s node with GPU metadata.
 
-  6. Set status.phase = "Ready"
-     - Set condition Ready=True, reason="ReconcileSucceeded"
-     - Set condition Discovering=False
-     - Update status subresource
-     - Record event "ReconcileSucceeded"
-     - Set r.reconciled = true
+  8. Record GPU Prometheus metrics (temperature, utilization, VRAM, power).
 
-  7. Return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
-     (periodic re-reconciliation for hardware state refresh)
+  9. If profiles defined:
+     - reconcileConfigMaps: generate values, create/update ConfigMaps, cleanup orphans.
+     - checkResourceWarning: set status.resourceWarning if overcommit.
+     - recordConfigMapCount: update Prometheus gauge.
+
+  10. Set status.phase = "Ready", record reconcile duration + success counter.
+
+  11. Return ctrl.Result{RequeueAfter: 5 * time.Minute}
 ```
 
 #### 3.3.3 Backoff Strategy
@@ -500,7 +535,82 @@ exits with a non-zero code.
 | `HEALTH_PORT` | `8081` | Port for /healthz and /readyz |
 | `MOCK_DISCOVERY` | `false` | Use MockDiscoverer instead of NVML (for dev/test) |
 
-### 3.6 cmd/preinstall -- Pre-Install Go Wrapper
+### 3.6 internal/config -- Helm Values Generation (E4)
+
+**Package:** `github.com/bibhuti-kar/idealab/internal/config`
+
+**Files:**
+- `merge.go` -- Deep map merge (src wins)
+- `values.go` -- `GenerateValues(profile, hardware)` combines hardware defaults with user overrides
+- `validate.go` -- `CheckResourceOvercommit(profiles, availableVRAMMB)` advisory warning
+- `render.go` -- `RenderYAML(values)` marshals to YAML bytes for ConfigMap
+
+#### 3.6.1 GenerateValues Logic
+
+1. Build hardware defaults: `gpu.model`, `gpu.vramMB` (minus 512MB reserve),
+   `gpu.computeCapability`, `gpu.cudaVersion`, `gpu.driverVersion`.
+2. Set `resources.limits.nvidia.com/gpu` from profile GPUCount (default 1 if GPU present).
+3. Set CPU/memory limits from profile or fall back to hardware info.
+4. Deep-merge user `HelmValues` on top — user values win.
+
+#### 3.6.2 ConfigMap Reconciliation
+
+In `internal/controller/configmaps.go`:
+
+- Per profile: generate values, render YAML, create/update ConfigMap.
+- ConfigMap name: `{gpucluster-name}-{profile-name}-values`.
+- Labels: `idealab.io/gpucluster`, `idealab.io/profile`, `app.kubernetes.io/managed-by: idealab-operator`.
+- Data key: `values.yaml`.
+- Orphan cleanup: list ConfigMaps by label, delete any not matching active profiles.
+
+#### 3.6.3 Finalizer
+
+In `internal/controller/finalizer.go`:
+
+- Finalizer name: `idealab.io/configmap-cleanup`.
+- Added when profiles exist; on GPUCluster deletion, deletes all managed ConfigMaps
+  then removes the finalizer.
+- No owner references (GPUCluster is cluster-scoped, ConfigMaps are namespaced).
+
+#### 3.6.4 CRD Status Extensions
+
+- `ProfileStatuses []ProfileStatus` -- per-profile reconciliation state (name, configMapName, ready).
+- `ResourceWarning string` -- set when total requested GPU memory exceeds available VRAM.
+
+### 3.7 internal/metrics -- Prometheus Metrics (E5)
+
+**Package:** `github.com/bibhuti-kar/idealab/internal/metrics`
+
+**Files:**
+- `metrics.go` -- Prometheus gauge/counter/histogram definitions + `RegisterAll()`
+
+#### 3.7.1 Custom Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `idealab_gpu_temperature_celsius` | Gauge | gpu, uuid | GPU temperature |
+| `idealab_gpu_utilization_percent` | Gauge | gpu, uuid | GPU core utilization |
+| `idealab_gpu_vram_total_mb` | Gauge | gpu, uuid | Total VRAM |
+| `idealab_gpu_vram_used_mb` | Gauge | gpu, uuid | Used VRAM |
+| `idealab_gpu_power_watts` | Gauge | gpu, uuid | Power consumption |
+| `idealab_reconcile_total` | Counter | result | Reconciliation count (success/error) |
+| `idealab_reconcile_duration_seconds` | Histogram | -- | Reconciliation duration |
+| `idealab_configmaps_generated` | Gauge | -- | Number of managed ConfigMaps |
+
+#### 3.7.2 Controller Metrics Helpers
+
+In `internal/controller/metrics.go`:
+
+- `recordGPUMetrics(info)` -- updates all GPU gauges from discovery data.
+- `recordConfigMapCount(n)` -- sets the configmaps_generated gauge.
+- Reconcile timing and counters recorded directly in `Reconcile()`.
+
+#### 3.7.3 Metrics Endpoint
+
+Controller-runtime serves metrics on `:8080/metrics`. Configurable via
+`METRICS_BIND_ADDRESS` env var (default `:8080`).
+
+### 3.8 cmd/preinstall -- Pre-Install Go Wrapper
 
 **Package:** `github.com/bibhuti-kar/idealab/cmd/preinstall`
 
@@ -543,8 +653,10 @@ existing shell script already handles:
 | `k8s.io/client-go` | v0.29.x | Kubernetes API client (transitive via controller-runtime) |
 | `k8s.io/apimachinery` | v0.29.x | API object types, scheme, serialization |
 | `k8s.io/api` | v0.29.x | Core Kubernetes API types (Node, ConfigMap, etc.) |
-| `github.com/NVIDIA/go-nvml` | v0.12.x | NVML Go bindings for GPU enumeration |
+| `github.com/NVIDIA/go-nvml` | v0.13.x | NVML Go bindings for GPU enumeration |
 | `github.com/jaypipes/ghw` | v0.12.x | CPU and memory enumeration |
+| `github.com/prometheus/client_golang` | v1.18.x | Prometheus metrics SDK |
+| `gopkg.in/yaml.v3` | v3.0.x | YAML rendering for Helm values ConfigMaps |
 
 ### 4.2 Standard Library (no go.mod entry needed)
 
@@ -654,7 +766,7 @@ step proceeds. The script uses `set -euo pipefail` for strict error handling.
 ### 6.3 Operator Pod Spec (from deploy/operator/deployment.yaml)
 
 - Image: `idealab-operator:latest` (will be pinned for production)
-- Port: 8081 (health)
+- Port: 8080 (metrics), 8081 (health)
 - Liveness: `GET /healthz` every 30s, initial delay 15s
 - Readiness: `GET /readyz` every 10s, initial delay 5s
 - Resources: 100m-200m CPU, 128Mi-256Mi memory
@@ -700,6 +812,8 @@ validated at startup, never hardcoded.
 | `LOG_FORMAT` | string | `json` | Must be one of: json, text |
 | `HEALTH_PORT` | int | `8081` | Must be 1024-65535 |
 | `MOCK_DISCOVERY` | bool | `false` | Must be true or false |
+| `POD_NAMESPACE` | string | `idealab-system` | Set via Downward API in deployment |
+| `METRICS_BIND_ADDRESS` | string | `:8080` | Address for Prometheus metrics endpoint |
 
 ### 7.2 GPUCluster CR Example
 
@@ -716,9 +830,23 @@ spec:
     enabled: true
   gpuFeatureDiscovery:
     enabled: true
+  applicationProfiles:
+    - name: ollama-inference
+      helmChart: ollama/ollama
+      helmValues:
+        ollama:
+          gpu:
+            enabled: true
+          models:
+            - phi3:mini
+      resources:
+        gpuCount: 1
+        gpuMemory: "4Gi"
+        cpuLimit: "4"
+        memoryLimit: "8Gi"
 ```
 
-After reconciliation, the status is auto-populated:
+After reconciliation, the status is auto-populated and ConfigMaps are generated:
 
 ```yaml
 status:
@@ -738,17 +866,18 @@ status:
       computeCapability: "7.5"
     memory:
       totalMB: 16384
+  profileStatuses:
+    - name: ollama-inference
+      configMapName: my-gpu-cluster-ollama-inference-values
+      ready: true
   conditions:
     - type: Ready
       status: "True"
-      lastTransitionTime: "2026-03-01T12:00:00Z"
       reason: ReconcileSucceeded
       message: "Device discovery completed successfully"
     - type: Discovering
       status: "False"
-      lastTransitionTime: "2026-03-01T12:00:00Z"
       reason: DiscoveryComplete
-      message: ""
 ```
 
 ---
@@ -798,6 +927,16 @@ idealab/
       reconciler.go             # GPUClusterReconciler
       conditions.go             # Condition helper functions
       labels.go                 # Node labeling logic
+      configmaps.go             # ConfigMap reconciliation per profile (E4)
+      finalizer.go              # Finalizer for ConfigMap cleanup (E4)
+      metrics.go                # GPU metrics recording helper (E5)
+    config/
+      merge.go                  # Deep map merge
+      values.go                 # Helm values generation from hardware + profiles
+      validate.go               # Resource overcommit check
+      render.go                 # YAML rendering
+    metrics/
+      metrics.go                # Prometheus gauge/counter/histogram definitions
     discovery/
       discovery.go              # Discoverer interface, DeviceInfo struct
       nvml.go                   # NVMLDiscoverer implementation

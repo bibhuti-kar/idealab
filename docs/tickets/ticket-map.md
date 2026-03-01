@@ -9,10 +9,10 @@
 
 ## Sprint Allocation
 
-| Sprint | Epics | Ticket Range |
-|--------|-------|-------------|
-| Sprint 1 | E1 + E2 + E3 | IDEAL-010, IDEAL-101, IDEAL-201 -- IDEAL-306 |
-| Sprint 2 | E4 | IDEAL-401 -- IDEAL-403 (backlog) |
+| Sprint | Epics | Ticket Range | Status |
+|--------|-------|-------------|--------|
+| Sprint 1 | E1 + E2 + E3 | IDEAL-010, IDEAL-101, IDEAL-201 -- IDEAL-306 | DONE |
+| Sprint 2 | E4 + E5 | IDEAL-401 -- IDEAL-403, IDEAL-501 -- IDEAL-503 | DONE |
 
 ---
 
@@ -57,13 +57,23 @@
 
 ---
 
-## EPIC: E4 -- Configuration Templates (Sprint 2 Backlog)
+## EPIC: E4 -- Configuration Templates
 
 | ID | Type | Title | Priority | Size | Status | Deps | JIRA/GH |
 |----|------|-------|----------|------|--------|------|---------|
-| IDEAL-401 | Story | Application profiles in GPUCluster spec | P1 | M | BACKLOG | IDEAL-301 | -- |
-| IDEAL-402 | Story | Helm values generation | P1 | L | BACKLOG | IDEAL-401, IDEAL-205 | -- |
-| IDEAL-403 | Story | Generated ConfigMap output | P1 | M | BACKLOG | IDEAL-402 | -- |
+| IDEAL-401 | Story | Application profiles in GPUCluster spec | P1 | M | DONE | IDEAL-301 | -- |
+| IDEAL-402 | Story | Helm values generation | P1 | L | DONE | IDEAL-401, IDEAL-205 | -- |
+| IDEAL-403 | Story | Generated ConfigMap output | P1 | M | DONE | IDEAL-402 | -- |
+
+---
+
+## EPIC: E5 -- Monitoring
+
+| ID | Type | Title | Priority | Size | Status | Deps | JIRA/GH |
+|----|------|-------|----------|------|--------|------|---------|
+| IDEAL-501 | Story | Prometheus metrics endpoint | P1 | M | DONE | IDEAL-303 | -- |
+| IDEAL-502 | Story | GPU telemetry metrics | P1 | M | DONE | IDEAL-501, IDEAL-205 | -- |
+| IDEAL-503 | Story | Reconciliation metrics | P1 | S | DONE | IDEAL-501, IDEAL-303 | -- |
 
 ---
 
@@ -582,6 +592,101 @@ MockDiscoverer, and verify end-to-end reconciliation behavior.
 
 ---
 
+### IDEAL-501: Prometheus metrics endpoint
+
+**Type:** Story
+**Epic:** E5 -- Monitoring
+**Priority:** P1
+**Size:** M (Medium)
+**Sprint:** 2
+**Blocked By:** IDEAL-303
+**Story Ref:** E5
+
+**Description:**
+Re-enable the controller-runtime metrics server on `:8080` and register custom
+Prometheus metrics. Create `internal/metrics/metrics.go` with all gauge, counter,
+and histogram definitions.
+
+**Acceptance Criteria:**
+1. Metrics endpoint serves on `:8080/metrics`.
+2. All custom metrics registered with `idealab_` namespace prefix.
+3. `METRICS_BIND_ADDRESS` env var configures the bind address.
+4. `RegisterAll()` called at operator startup.
+
+**Files Created:**
+- `internal/metrics/metrics.go`
+- `internal/metrics/metrics_test.go`
+
+**Definition of Done:**
+- `TestMetricsRegistration` passes.
+- `curl localhost:8080/metrics | grep idealab_` returns results.
+
+---
+
+### IDEAL-502: GPU telemetry metrics
+
+**Type:** Story
+**Epic:** E5 -- Monitoring
+**Priority:** P1
+**Size:** M (Medium)
+**Sprint:** 2
+**Blocked By:** IDEAL-501, IDEAL-205
+**Story Ref:** E5
+
+**Description:**
+Add `VRAMUsedMB` and `PowerWatts` fields to `GPUInfo`. Read `memory.Used` and
+`device.GetPowerUsage()` from NVML. Export as Prometheus gauges.
+
+**Acceptance Criteria:**
+1. `GPUInfo` has `VRAMUsedMB` and `PowerWatts` fields.
+2. NVML reads memory used and power usage per GPU.
+3. Mock discoverer includes mock values.
+4. Controller records GPU metrics each reconcile cycle.
+
+**Files Modified:**
+- `internal/discovery/discovery.go`
+- `internal/discovery/gpu_nvml.go`
+- `internal/discovery/mock.go`
+
+**Files Created:**
+- `internal/controller/metrics.go`
+- `internal/controller/metrics_test.go`
+
+**Definition of Done:**
+- `TestRecordGPUMetrics` and `TestRecordGPUMetrics_NoGPU` pass.
+
+---
+
+### IDEAL-503: Reconciliation metrics
+
+**Type:** Story
+**Epic:** E5 -- Monitoring
+**Priority:** P1
+**Size:** S (Small)
+**Sprint:** 2
+**Blocked By:** IDEAL-501, IDEAL-303
+**Story Ref:** E5
+
+**Description:**
+Record reconcile duration histogram and success/error counters in the reconcile
+loop. Record configmaps_generated gauge after ConfigMap reconciliation.
+
+**Acceptance Criteria:**
+1. `idealab_reconcile_total` counter incremented per reconcile with result label.
+2. `idealab_reconcile_duration_seconds` histogram records each cycle.
+3. `idealab_configmaps_generated` gauge reflects managed ConfigMap count.
+
+**Files Modified:**
+- `internal/controller/reconciler.go`
+- `cmd/operator/main.go`
+- `deploy/operator/deployment.yaml`
+
+**Definition of Done:**
+- `TestCounterIncrement` and `TestConfigMapsGauge` pass.
+- Deployment YAML has metrics port 8080 and `POD_NAMESPACE` env.
+
+---
+
 ## Dependency Graph
 
 ```
@@ -595,19 +700,29 @@ IDEAL-010 (Go module init)
   |       +---> IDEAL-203 (GPU discovery via NVML)
   |       +---> IDEAL-204 (Memory discovery)
   |               |
-  |               +---> IDEAL-205 (Integrate NVMLDiscoverer)
-  |                       |
-  |                       +---> IDEAL-303 (GPUCluster reconciler) ----+
-  |                                |                                  |
-  +---> IDEAL-301 (CRD Go types) --+                                  |
-  |                                |                                  |
-  |                                +---> IDEAL-304 (Node labeling)    |
-  |                                |                                  |
-  +---> IDEAL-302 (Health server) --+---> IDEAL-305 (Operator main)   |
-                                   |                                  |
-                                   +---> IDEAL-306 (Integration tests)|
-                                          ^                           |
-                                          +---------------------------+
+  |               +---> IDEAL-205 (Integrate NVMLDiscoverer) -----+
+  |                       |                                        |
+  |                       +---> IDEAL-303 (GPUCluster reconciler) -+---+
+  |                                |                                   |
+  +---> IDEAL-301 (CRD Go types) --+                                   |
+  |                                |                                   |
+  |                                +---> IDEAL-304 (Node labeling)     |
+  |                                |                                   |
+  +---> IDEAL-302 (Health server) --+---> IDEAL-305 (Operator main)    |
+                                   |                                   |
+                                   +---> IDEAL-306 (Integration tests) |
+                                                                       |
+  IDEAL-301 ---> IDEAL-401 (Application profiles) ------+              |
+                   |                                     |              |
+  IDEAL-205 ------+---> IDEAL-402 (Helm values gen) -----+              |
+                          |                                             |
+                          +---> IDEAL-403 (ConfigMap output)            |
+                                                                       |
+  IDEAL-303 ---> IDEAL-501 (Prometheus endpoint) ------+               |
+                   |                                    |              |
+  IDEAL-205 ------+---> IDEAL-502 (GPU telemetry) -----+              |
+                                                        |              |
+  IDEAL-303 ---> IDEAL-503 (Reconcile metrics) --------+              |
 ```
 
 ---

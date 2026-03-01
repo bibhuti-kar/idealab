@@ -16,6 +16,7 @@ spec:
       labels:
         app: idealab-operator
     spec:
+      runtimeClassName: nvidia
       serviceAccountName: idealab-operator
       containers:
         - name: operator
@@ -52,6 +53,7 @@ spec:
               memory: 128Mi
           securityContext:
             runAsNonRoot: true
+            runAsUser: 1000
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
             capabilities:

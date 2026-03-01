@@ -24,6 +24,7 @@ import (
 	"github.com/bibhuti-kar/idealab/internal/controller"
 	"github.com/bibhuti-kar/idealab/internal/discovery"
 	healthpkg "github.com/bibhuti-kar/idealab/internal/health"
+	"github.com/bibhuti-kar/idealab/internal/metrics"
 )
 
 func main() {
@@ -43,6 +44,8 @@ func main() {
 func run(ctx context.Context, logger *slog.Logger) error {
 	scheme := setupScheme()
 	healthPort := envInt("HEALTH_PORT", 8081)
+
+	metrics.RegisterAll()
 
 	mgr, err := setupManager(scheme)
 	if err != nil {
@@ -89,22 +92,25 @@ func setupScheme() *runtime.Scheme {
 }
 
 func setupManager(scheme *runtime.Scheme) (ctrl.Manager, error) {
+	metricsAddr := envStr("METRICS_BIND_ADDRESS", ":8080")
 	return ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
-			BindAddress: "0",
+			BindAddress: metricsAddr,
 		},
 		LeaderElection: false,
 	})
 }
 
 func setupReconciler(mgr ctrl.Manager, logger *slog.Logger) *controller.GPUClusterReconciler {
+	ns := envStr("POD_NAMESPACE", "idealab-system")
 	return &controller.GPUClusterReconciler{
 		Client:     mgr.GetClient(),
 		Scheme:     mgr.GetScheme(),
 		Discoverer: createDiscoverer(logger),
 		Logger:     logger,
 		Recorder:   mgr.GetEventRecorderFor("idealab-operator"),
+		Namespace:  ns,
 	}
 }
 

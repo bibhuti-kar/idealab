@@ -39,11 +39,14 @@ spec:
                   type: array
                   items:
                     type: object
+                    required: [name, helmChart]
                     properties:
                       name:
                         type: string
+                        minLength: 1
                       helmChart:
                         type: string
+                        minLength: 1
                       helmValues:
                         type: object
                         x-kubernetes-preserve-unknown-fields: true
@@ -117,6 +120,19 @@ spec:
                         type: string
                       message:
                         type: string
+                profileStatuses:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      configMapName:
+                        type: string
+                      ready:
+                        type: boolean
+                resourceWarning:
+                  type: string
       subresources:
         status: {}
       additionalPrinterColumns:

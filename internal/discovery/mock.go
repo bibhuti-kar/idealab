@@ -32,11 +32,13 @@ func NewMockDiscoverer() *MockDiscoverer {
 					Model:             "NVIDIA GeForce GTX 1660 Ti",
 					UUID:              "GPU-12345678-1234-1234-1234-123456789012",
 					VRAMMB:            6144,
+					VRAMUsedMB:        512,
 					DriverVersion:     "560.35.03",
 					CUDAVersion:       "12.6",
 					ComputeCapability: "7.5",
 					Temperature:       45,
 					UtilizationPct:    0,
+					PowerWatts:        15,
 				},
 			},
 			Memory: MemoryInfo{

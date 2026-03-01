@@ -62,9 +62,18 @@ type ProfileResources struct {
 
 // GPUClusterStatus defines the observed state of GPUCluster.
 type GPUClusterStatus struct {
-	Phase      Phase              `json:"phase,omitempty"`
-	Node       NodeInfo           `json:"node,omitempty"`
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	Phase            Phase              `json:"phase,omitempty"`
+	Node             NodeInfo           `json:"node,omitempty"`
+	Conditions       []metav1.Condition `json:"conditions,omitempty"`
+	ProfileStatuses  []ProfileStatus    `json:"profileStatuses,omitempty"`
+	ResourceWarning  string             `json:"resourceWarning,omitempty"`
+}
+
+// ProfileStatus tracks the reconciliation state of a single application profile.
+type ProfileStatus struct {
+	Name          string `json:"name"`
+	ConfigMapName string `json:"configMapName,omitempty"`
+	Ready         bool   `json:"ready,omitempty"`
 }
 
 // Phase represents the lifecycle phase of a GPUCluster.

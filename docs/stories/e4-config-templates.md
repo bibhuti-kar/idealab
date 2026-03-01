@@ -3,6 +3,7 @@
 **Milestone:** M3 -- Helm Chart Template Generation for AI Workloads
 **JIRA Epic:** IDEAL-E4
 **Priority:** P1
+**Status:** IMPLEMENTED (Sprint 2)
 **Dependencies:** E3 (GPUCluster CRD and operator core must exist)
 
 ---
@@ -47,6 +48,9 @@ THEN the API server rejects the resource with a validation error
 AND the error message identifies which profile field is invalid
 ```
 
+> **Implementation:** CRD YAML updated with `required: [name, helmChart]` and
+> `minLength: 1` on both fields (`deploy/crds/gpucluster.yaml`).
+
 ---
 
 ## S4.2: Helm Values Generation
@@ -72,6 +76,10 @@ AND memory limits derived from discovered system memory
 AND the GPU device name and compute capability are included as metadata
 ```
 
+> **Implementation:** `internal/config/values.go` — `GenerateValues()` builds
+> hardware defaults (gpu model, vramMB minus 512 reserve, compute capability,
+> CUDA/driver versions, resource limits) then deep-merges user HelmValues on top.
+
 **AC2: Values file contains user-specified overrides**
 ```
 GIVEN a GPUCluster application profile includes environment overrides
@@ -79,6 +87,9 @@ WHEN the operator generates Helm values for that profile
 THEN the generated values include all user-specified environment key-value pairs
 AND user overrides take precedence over hardware-derived defaults
 ```
+
+> **Implementation:** `internal/config/merge.go` — `mergeMaps()` performs
+> recursive deep merge where user values (src) always win over defaults (dst).
 
 **AC3: Resource allocation respects hardware limits**
 ```
@@ -89,6 +100,11 @@ THEN the operator sets a condition on the GPUCluster with type "ResourceWarning"
      and status "True" indicating that requested resources exceed available hardware
 AND the values files are still generated (the warning is advisory, not blocking)
 ```
+
+> **Implementation:** `internal/config/validate.go` — `CheckResourceOvercommit()`
+> returns advisory warning string. Set on `status.resourceWarning` field.
+> `internal/controller/configmaps.go` — `checkResourceWarning()` called after
+> ConfigMap reconciliation.
 
 ---
 
@@ -110,8 +126,14 @@ WHEN the reconciliation loop completes
 THEN a ConfigMap is created in the same namespace as the GPUCluster resource
 AND the ConfigMap name follows the pattern: {gpucluster-name}-{profile-name}-values
 AND the ConfigMap data contains a key "values.yaml" with the generated YAML content
-AND the ConfigMap has an owner reference pointing to the GPUCluster resource
+AND the ConfigMap has labels linking it to the GPUCluster resource
 ```
+
+> **Implementation:** `internal/controller/configmaps.go` — ConfigMaps use labels
+> (`idealab.io/gpucluster`, `idealab.io/profile`, `app.kubernetes.io/managed-by`)
+> instead of owner references (cross-scope: cluster-scoped CR can't own namespaced
+> ConfigMaps). Cleanup via finalizer `idealab.io/configmap-cleanup` in
+> `internal/controller/finalizer.go`.
 
 **AC2: ConfigMap is updated when GPUCluster changes**
 ```
@@ -121,3 +143,7 @@ THEN the operator re-generates the Helm values
 AND updates the existing ConfigMap with the new content
 AND the ConfigMap's resourceVersion changes to reflect the update
 ```
+
+> **Implementation:** `reconcileConfigMaps()` in `configmaps.go` checks for
+> existing ConfigMap via `Get`, then calls `Update` if found, `Create` if not.
+> Orphan profiles (removed from spec) are cleaned up via `cleanupOrphanConfigMaps()`.

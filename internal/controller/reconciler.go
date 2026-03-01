@@ -17,6 +17,7 @@ import (
 
 	v1alpha1 "github.com/bibhuti-kar/idealab/api/v1alpha1"
 	"github.com/bibhuti-kar/idealab/internal/discovery"
+	"github.com/bibhuti-kar/idealab/internal/metrics"
 )
 
 const (
@@ -31,6 +32,7 @@ type GPUClusterReconciler struct {
 	Discoverer discovery.Discoverer
 	Logger     *slog.Logger
 	Recorder   record.EventRecorder
+	Namespace  string
 	reconciled atomic.Bool
 }
 
@@ -41,6 +43,7 @@ func (r *GPUClusterReconciler) IsReconciled() bool {
 
 // Reconcile handles a single reconciliation cycle for a GPUCluster.
 func (r *GPUClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	start := time.Now()
 	logger := r.Logger.With("gpucluster", req.Name)
 
 	var gc v1alpha1.GPUCluster
@@ -49,6 +52,19 @@ func (r *GPUClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("fetch GPUCluster: %w", err)
+	}
+
+	// Handle deletion with finalizer cleanup.
+	deleting, err := r.handleDeletion(ctx, logger, &gc)
+	if deleting || err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Add finalizer if profiles are defined.
+	if len(gc.Spec.ApplicationProfiles) > 0 {
+		if err := r.ensureFinalizer(ctx, &gc); err != nil {
+			return ctrl.Result{}, fmt.Errorf("ensure finalizer: %w", err)
+		}
 	}
 
 	if err := r.ensureDiscovering(ctx, logger, &gc); err != nil {
@@ -62,8 +78,26 @@ func (r *GPUClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	gc.Status.Node = mapDeviceInfoToNodeInfo(deviceInfo)
 	r.applyNodeLabels(ctx, logger, &gc, deviceInfo)
+	recordGPUMetrics(deviceInfo)
 
-	return r.markReady(ctx, logger, &gc)
+	// Reconcile ConfigMaps for application profiles.
+	if len(gc.Spec.ApplicationProfiles) > 0 {
+		if err := r.reconcileConfigMaps(ctx, logger, &gc, deviceInfo); err != nil {
+			logger.Error("configmap reconciliation failed", "error", err)
+		}
+		r.checkResourceWarning(logger, &gc, deviceInfo)
+		recordConfigMapCount(len(gc.Status.ProfileStatuses))
+	}
+
+	result, err := r.markReady(ctx, logger, &gc)
+	duration := time.Since(start).Seconds()
+	metrics.ReconcileDuration.Observe(duration)
+	if err != nil {
+		metrics.ReconcileTotal.WithLabelValues("error").Inc()
+	} else {
+		metrics.ReconcileTotal.WithLabelValues("success").Inc()
+	}
+	return result, err
 }
 
 // SetupWithManager registers the reconciler with the manager.
